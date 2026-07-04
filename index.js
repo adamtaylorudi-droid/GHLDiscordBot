@@ -1,4 +1,5 @@
 require("dotenv").config();
+
 const express = require("express");
 const {
     Client,
@@ -11,12 +12,13 @@ const {
 const app = express();
 app.use(express.json());
 
+const PORT = process.env.PORT || 4000;
+
 // =========================
 // STATE
 // =========================
 
 let agents = {};
-let dashboardMessage;
 
 // =========================
 // DISCORD CLIENT
@@ -37,12 +39,12 @@ const client = new Client({
 const commands = [
     new SlashCommandBuilder()
         .setName("online")
-        .setDescription("Set your status to online"),
+        .setDescription("Set yourself online"),
 
     new SlashCommandBuilder()
         .setName("offline")
-        .setDescription("Set your status to offline")
-].map(cmd => cmd.toJSON());
+        .setDescription("Set yourself offline")
+].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
@@ -57,74 +59,74 @@ async function registerCommands() {
         );
         console.log("Slash commands registered");
     } catch (err) {
-        console.log("Command registration error:", err.message);
+        console.log("Command error:", err.message);
     }
 }
 
 // =========================
-// HELPERS
+// SAFE AGENT INIT
 // =========================
 
-function formatDuration(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-
-    if (hours > 0) {
-        return `${hours.toString().padStart(2, "0")}:${minutes
-            .toString()
-            .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+function ensureAgent(name) {
+    if (!agents[name]) {
+        agents[name] = {
+            presence: "offline",
+            call: false,
+            callStartTime: null
+        };
     }
-
-    return `${minutes.toString().padStart(2, "0")}:${seconds
-        .toString()
-        .padStart(2, "0")}`;
+    return agents[name];
 }
 
 // =========================
-// GHL WEBHOOK (CALL STATE)
+// WEBHOOK (REAL GHL LOGIC)
 // =========================
 
 app.post("/ghl-webhook", (req, res) => {
-    const body = req.body;
+    try {
+        const body = req.body;
 
-    const agent = body?.agent_name || "Unknown";
-    const event = body?.event;
+        // ---- FIX: handle nested GHL payloads safely ----
+        let event = body?.event;
+        let agent = body?.agent_name;
 
-    if (!agent || !event) return res.sendStatus(200);
+        if (!agent && body?.customData?.status) {
+            try {
+                const parsed = JSON.parse(body.customData.status);
+                agent = parsed.agent_name;
+                event = parsed.event || event;
+            } catch (e) {}
+        }
 
-    if (!agents[agent]) {
-        agents[agent] = {
-            presence: "offline",
-            call: false,
-            callStartTime: null,
-            lastCallUpdate: 0
-        };
+        if (!agent || !event) return res.sendStatus(200);
+
+        const data = ensureAgent(agent);
+
+        console.log("GHL EVENT:", agent, event);
+
+        // =========================
+        // ONLY REAL STATE CHANGES
+        // =========================
+
+        if (event === "call_started") {
+            data.call = true;
+            data.callStartTime = Date.now();
+        }
+
+        if (event === "call_ended") {
+            data.call = false;
+            data.callStartTime = null;
+        }
+
+        res.sendStatus(200);
+    } catch (err) {
+        console.log("Webhook error:", err.message);
+        res.sendStatus(200);
     }
-
-    // CALL START
-    if (event === "call_started") {
-        agents[agent].call = true;
-        agents[agent].callStartTime = Date.now();
-        agents[agent].lastCallUpdate = Date.now();
-    }
-
-    // CALL END
-    if (event === "call_ended") {
-        agents[agent].call = false;
-        agents[agent].callStartTime = null;
-        agents[agent].lastCallUpdate = Date.now();
-    }
-
-    console.log("GHL Update:", agent, agents[agent]);
-
-    res.sendStatus(200);
 });
 
 // =========================
-// SLASH COMMANDS (ROLE LOCK + NICKNAME)
+// DISCORD COMMANDS (ROLE LOCK)
 // =========================
 
 client.on("interactionCreate", async interaction => {
@@ -132,85 +134,58 @@ client.on("interactionCreate", async interaction => {
 
     const member = interaction.member;
 
-    // ROLE CHECK
-    const hasRole = member.roles.cache.some(r => r.name === "Agents");
+    const allowed = member.roles.cache.some(r => r.name === "Agents");
 
-    if (!hasRole) {
+    if (!allowed) {
         return interaction.reply({
-            content: "❌ You do not have permission (Agents only).",
+            content: "❌ Agents only.",
             ephemeral: true
         });
     }
 
-    // USE NICKNAME
     const name = member.displayName;
-
-    if (!agents[name]) {
-        agents[name] = {
-            presence: "offline",
-            call: false,
-            callStartTime: null,
-            lastCallUpdate: 0
-        };
-    }
+    const data = ensureAgent(name);
 
     if (interaction.commandName === "online") {
-        agents[name].presence = "online";
+        data.presence = "online";
 
         return interaction.reply({
-            content: "🟢 You are now ONLINE",
+            content: "🟢 You are now online",
             ephemeral: true
         });
     }
 
     if (interaction.commandName === "offline") {
-        agents[name].presence = "offline";
+        data.presence = "offline";
 
         return interaction.reply({
-            content: "⚫ You are now OFFLINE",
+            content: "⚫ You are now offline",
             ephemeral: true
         });
     }
 });
 
 // =========================
-// STALE CALL FIX (SAFETY NET)
+// DASHBOARD BUILDER
 // =========================
 
-setInterval(() => {
-    const now = Date.now();
+function formatTime(ms) {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${r.toString().padStart(2, "0")}`;
+}
 
-    for (const agent in agents) {
-        const data = agents[agent];
-
-        if (
-            data.call === true &&
-            data.lastCallUpdate &&
-            now - data.lastCallUpdate > 90 * 1000
-        ) {
-            console.log(`Fixing stale call state: ${agent}`);
-
-            data.call = false;
-            data.callStartTime = null;
-            data.lastCallUpdate = now;
-        }
-    }
-}, 15000);
-
-// =========================
-// DASHBOARD BUILDER (LIVE TIMER)
-// =========================
-
-function buildDashboard() {
-    let output = [];
+function dashboard() {
+    let out = [];
 
     for (const [name, data] of Object.entries(agents)) {
-        let status = "";
+        let status;
 
         if (data.call) {
             const duration = data.callStartTime
-                ? formatDuration(Date.now() - data.callStartTime)
-                : "00:00";
+                ? formatTime(Date.now() - data.callStartTime)
+                : "0:00";
 
             status = `🔴 On Call (${duration})`;
         } else if (data.presence === "online") {
@@ -219,13 +194,10 @@ function buildDashboard() {
             status = "⚫ Offline";
         }
 
-        output.push(`${name} — ${status}`);
+        out.push(`${name} — ${status}`);
     }
 
-    return `📞 **Live Agent Dashboard**
-
-${output.length ? output.join("\n") : "No agents online"}
-`;
+    return `📞 Live Agent Dashboard\n\n${out.join("\n") || "No agents"}`;
 }
 
 // =========================
@@ -239,20 +211,19 @@ client.once("ready", async () => {
 
     const channel = await client.channels.fetch(process.env.CHANNEL_ID);
 
-    dashboardMessage = await channel.send(buildDashboard());
+    let msg = await channel.send(dashboard());
 
-    // LIVE UPDATE EVERY SECOND (TIMERS)
     setInterval(() => {
-        dashboardMessage.edit(buildDashboard()).catch(() => {});
-    }, 1000);
+        msg.edit(dashboard()).catch(() => {});
+    }, 2000);
 });
 
 // =========================
-// START SYSTEM
+// START SERVER
 // =========================
 
 client.login(process.env.DISCORD_TOKEN);
 
-app.listen(4000, () => {
-    console.log("Bridge server running on port 4000");
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
