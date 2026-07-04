@@ -19,6 +19,7 @@ const PORT = process.env.PORT || 4000;
 // =========================
 
 let agents = {};
+let dashboardMsg = null;
 
 // =========================
 // DISCORD CLIENT
@@ -33,7 +34,7 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS (SINGLE COPY)
+// COMMANDS
 // =========================
 
 const commands = [
@@ -56,6 +57,7 @@ async function registerCommands() {
         ),
         { body: commands }
     );
+
     console.log("Slash commands registered");
 }
 
@@ -64,16 +66,17 @@ async function registerCommands() {
 // =========================
 
 function getAgent(name) {
-    if (!name) name = "Unknown Agent";
+    const safe = name?.trim() || "Unknown Agent";
 
-    if (!agents[name]) {
-        agents[name] = {
+    if (!agents[safe]) {
+        agents[safe] = {
             presence: "offline",
             call: false,
             callStartTime: null
         };
     }
-    return agents[name];
+
+    return agents[safe];
 }
 
 function normalize(body) {
@@ -84,7 +87,12 @@ function parseGHL(body) {
     const payload = normalize(body);
 
     return {
-        event: payload?.event || "unknown",
+        event:
+            payload?.event ||
+            payload?.type ||
+            payload?.call_status ||
+            "unknown",
+
         agent:
             payload?.agent_name ||
             payload?.agent?.name ||
@@ -101,85 +109,116 @@ app.post("/ghl-webhook", (req, res) => {
     try {
         const { event, agent } = parseGHL(req.body);
 
-        console.log("EVENT:", event, "AGENT:", agent);
+        const data = getAgent(agent);
 
         if (event === "call_started") {
-            const a = getAgent(agent);
-            a.call = true;
-            a.callStartTime = Date.now();
+            data.call = true;
+            data.callStartTime = Date.now();
         }
 
         if (event === "call_ended") {
-            const a = getAgent(agent);
-            a.call = false;
-            a.callStartTime = null;
+            data.call = false;
+            data.callStartTime = null;
         }
 
         res.sendStatus(200);
-    } catch (e) {
-        console.log(e);
+    } catch (err) {
+        console.log(err.message);
         res.sendStatus(200);
     }
 });
 
 // =========================
-// DISCORD COMMANDS
+// INTERACTIONS
 // =========================
 
 client.on("interactionCreate", async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
+    const member = interaction.member;
+    const allowed = member?.roles?.cache?.some(r => r.name === "Agents");
+
     try {
-        const member = interaction.member;
-
-        if (!member.roles.cache.some(r => r.name === "Agents")) {
-            return interaction.reply({ content: "Agents only", flags: 64 });
-        }
-
         await interaction.deferReply({ flags: 64 });
+    } catch (err) {
+        console.log("interaction expired:", err.message);
+        return;
+    }
 
-        const name = member.displayName;
-        const agent = getAgent(name);
+    if (!allowed) {
+        return interaction.editReply("❌ Agents only.");
+    }
 
-        if (interaction.commandName === "online") {
-            agent.presence = "online";
-            return interaction.editReply("🟢 Online");
-        }
+    const name = member?.displayName || "Unknown Agent";
+    const data = getAgent(name);
 
-        if (interaction.commandName === "offline") {
-            agent.presence = "offline";
-            return interaction.editReply("⚫ Offline");
-        }
+    if (interaction.commandName === "online") {
+        data.presence = "online";
+        return interaction.editReply("🟢 You are now online");
+    }
 
-    } catch (e) {
-        console.log(e);
+    if (interaction.commandName === "offline") {
+        data.presence = "offline";
+        return interaction.editReply("⚫ You are now offline");
     }
 });
+
+// =========================
+// DASHBOARD (🔥 FINAL RULE CHANGE)
+// =========================
+
+function formatTime(ms) {
+    const total = Math.floor(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function buildDashboard() {
+    const output = [];
+
+    for (const [name, data] of Object.entries(agents)) {
+
+        // 🔥 NEW RULE:
+        // ONLY show agents who used /online
+        if (data.presence !== "online") continue;
+
+        let status;
+
+        if (data.call) {
+            const duration = data.callStartTime
+                ? formatTime(Date.now() - data.callStartTime)
+                : "0:00";
+
+            status = `🔴 On Call (${duration})`;
+        } else {
+            status = "🟢 Online";
+        }
+
+        output.push(`${name} — ${status}`);
+    }
+
+    return `📞 Live Agent Dashboard\n\n${output.join("\n") || "No active agents"}`;
+}
 
 // =========================
 // READY
 // =========================
 
-client.once("clientReady", async () => {
+client.once("ready", async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
     await registerCommands();
 
     const channel = await client.channels.fetch(process.env.CHANNEL_ID);
 
-    let msg = await channel.send("Dashboard starting...");
+    dashboardMsg = await channel.send(buildDashboard());
 
     setInterval(() => {
-        let output = Object.entries(agents)
-            .map(([name, a]) => {
-                if (a.call) return `${name} 🔴 On Call`;
-                if (a.presence === "online") return `${name} 🟢 Online`;
-                return `${name} ⚫ Offline`;
-            })
-            .join("\n");
+        if (!dashboardMsg) return;
 
-        msg.edit(output || "No agents").catch(() => {});
-    }, 3000);
+        dashboardMsg.edit(buildDashboard()).catch(() => {});
+    }, 5000);
 });
 
 // =========================
@@ -187,4 +226,7 @@ client.once("clientReady", async () => {
 // =========================
 
 client.login(process.env.DISCORD_TOKEN);
-app.listen(PORT, () => console.log("Running on", PORT));
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
