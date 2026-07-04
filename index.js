@@ -107,11 +107,15 @@ function parseGHL(body) {
 
 app.post("/ghl-webhook", (req, res) => {
     try {
+        console.log("Incoming GHL payload:", JSON.stringify(req.body, null, 2));
+
         const { event, agent } = parseGHL(req.body);
+        console.log("Parsed event/agent:", event, agent);
 
         const data = getAgent(agent);
 
         if (event === "call_started") {
+            data.presence = "online"; // trust GHL as the source of truth
             data.call = true;
             data.callStartTime = Date.now();
         }
@@ -164,7 +168,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// DASHBOARD (🔥 FINAL RULE CHANGE)
+// DASHBOARD
 // =========================
 
 function formatTime(ms) {
@@ -179,8 +183,7 @@ function buildDashboard() {
 
     for (const [name, data] of Object.entries(agents)) {
 
-        // 🔥 NEW RULE:
-        // ONLY show agents who used /online
+        // ONLY show agents who used /online OR who GHL reported as active
         if (data.presence !== "online") continue;
 
         let status;
@@ -214,10 +217,15 @@ client.once("ready", async () => {
 
     dashboardMsg = await channel.send(buildDashboard());
 
+    let lastDashboard = "";
     setInterval(() => {
         if (!dashboardMsg) return;
 
-        dashboardMsg.edit(buildDashboard()).catch(() => {});
+        const next = buildDashboard();
+        if (next === lastDashboard) return;
+        lastDashboard = next;
+
+        dashboardMsg.edit(next).catch(() => {});
     }, 5000);
 });
 
@@ -225,7 +233,9 @@ client.once("ready", async () => {
 // START
 // =========================
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+    console.error("Failed to log in:", err.message);
+});
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
