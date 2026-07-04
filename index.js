@@ -69,6 +69,8 @@ async function registerCommands() {
 // =========================
 
 function getAgent(name) {
+    if (!name) name = "Unknown Agent";
+
     if (!agents[name]) {
         agents[name] = {
             presence: "offline",
@@ -80,25 +82,38 @@ function getAgent(name) {
 }
 
 // =========================
-// NORMALIZE GHL PAYLOAD
+// NORMALIZE PAYLOAD (🔥 FIXED)
+// =========================
+
+function normalizePayload(reqBody) {
+    // handles BOTH:
+    // 1. { event, agent_name }
+    // 2. { body: { event, agent_name } }
+
+    return reqBody?.body || reqBody || {};
+}
+
+// =========================
+// EXTRACT EVENT + AGENT (🔥 FIXED)
 // =========================
 
 function parseGHL(body) {
-    let event = body?.event;
-    let agent = body?.agent_name;
+    const payload = normalizePayload(body);
 
-    // 🔥 FIX: GoHighLevel nested payload (your real issue)
-    if (body?.customData?.status) {
-        try {
-            const parsed = JSON.parse(body.customData.status);
+    let event =
+        payload?.event ||
+        payload?.type ||
+        payload?.call_status ||
+        "unknown";
 
-            if (parsed?.event) event = parsed.event;
-            if (parsed?.agent_name) agent = parsed.agent_name;
-
-        } catch (e) {
-            console.log("Failed parsing customData.status");
-        }
-    }
+    let agent =
+        payload?.agent_name ||
+        payload?.agent?.name ||
+        payload?.user?.name ||
+        (payload?.user
+            ? `${payload.user.firstName || ""} ${payload.user.lastName || ""}`.trim()
+            : "") ||
+        "Unknown Agent";
 
     return { event, agent };
 }
@@ -113,17 +128,17 @@ app.post("/ghl-webhook", (req, res) => {
 
         const { event, agent } = parseGHL(req.body);
 
-        if (!agent || !event) {
-            console.log("Missing data:", { agent, event });
+        console.log("PROCESSED EVENT:", { event, agent });
+
+        if (!event || event === "unknown") {
+            console.log("⚠️ Missing event");
             return res.sendStatus(200);
         }
 
         const data = getAgent(agent);
 
-        console.log("PROCESSED EVENT:", agent, event);
-
         // =========================
-        // CALL STATE LOGIC (SOURCE OF TRUTH = GHL ONLY)
+        // CALL STATE LOGIC
         // =========================
 
         if (event === "call_started") {
@@ -185,7 +200,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// DASHBOARD FORMAT
+// DASHBOARD
 // =========================
 
 function formatTime(ms) {
@@ -238,7 +253,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// START SERVER
+// START
 // =========================
 
 client.login(process.env.DISCORD_TOKEN);
