@@ -86,19 +86,38 @@ function normalize(body) {
 function parseGHL(body) {
     const payload = normalize(body);
 
-    return {
-        event:
-            payload?.event ||
-            payload?.type ||
-            payload?.call_status ||
-            "unknown",
+    // GHL sometimes nests our custom JSON as a stringified value
+    // inside customData.status instead of sending it at the root.
+    let embedded = {};
+    try {
+        embedded = JSON.parse(payload?.customData?.status);
+    } catch (err) {
+        embedded = {};
+    }
 
-        agent:
-            payload?.agent_name ||
-            payload?.agent?.name ||
-            payload?.user?.name ||
-            "Unknown Agent"
-    };
+    const event =
+        embedded?.event ||
+        payload?.event ||
+        payload?.type ||
+        payload?.call_status ||
+        "unknown";
+
+    // Prefer real first/last name fields from the contact's user object,
+    // since merge tags like {{user.name}} don't always resolve.
+    const firstLast = [payload?.user?.firstName, payload?.user?.lastName]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+    const agent =
+        firstLast ||
+        (embedded?.agent_name && embedded.agent_name.trim()) ||
+        payload?.agent_name ||
+        payload?.agent?.name ||
+        payload?.user?.name ||
+        "Unknown Agent";
+
+    return { event, agent };
 }
 
 // =========================
