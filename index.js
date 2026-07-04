@@ -44,7 +44,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName("offline")
         .setDescription("Set yourself offline")
-].map(c => c.toJSON());
+].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
@@ -57,9 +57,10 @@ async function registerCommands() {
             ),
             { body: commands }
         );
+
         console.log("Slash commands registered");
     } catch (err) {
-        console.log("Command error:", err.message);
+        console.log("Command register error:", err.message);
     }
 }
 
@@ -67,7 +68,7 @@ async function registerCommands() {
 // SAFE AGENT INIT
 // =========================
 
-function ensureAgent(name) {
+function getAgent(name) {
     if (!agents[name]) {
         agents[name] = {
             presence: "offline",
@@ -79,33 +80,50 @@ function ensureAgent(name) {
 }
 
 // =========================
-// WEBHOOK (REAL GHL LOGIC)
+// NORMALIZE GHL PAYLOAD
+// =========================
+
+function parseGHL(body) {
+    let event = body?.event;
+    let agent = body?.agent_name;
+
+    // 🔥 FIX: GoHighLevel nested payload (your real issue)
+    if (body?.customData?.status) {
+        try {
+            const parsed = JSON.parse(body.customData.status);
+
+            if (parsed?.event) event = parsed.event;
+            if (parsed?.agent_name) agent = parsed.agent_name;
+
+        } catch (e) {
+            console.log("Failed parsing customData.status");
+        }
+    }
+
+    return { event, agent };
+}
+
+// =========================
+// WEBHOOK ROUTE
 // =========================
 
 app.post("/ghl-webhook", (req, res) => {
     try {
-        const body = req.body;
+        console.log("RAW WEBHOOK:", JSON.stringify(req.body, null, 2));
 
-        // ---- FIX: handle nested GHL payloads safely ----
-        let event = body?.event;
-        let agent = body?.agent_name;
+        const { event, agent } = parseGHL(req.body);
 
-        if (!agent && body?.customData?.status) {
-            try {
-                const parsed = JSON.parse(body.customData.status);
-                agent = parsed.agent_name;
-                event = parsed.event || event;
-            } catch (e) {}
+        if (!agent || !event) {
+            console.log("Missing data:", { agent, event });
+            return res.sendStatus(200);
         }
 
-        if (!agent || !event) return res.sendStatus(200);
+        const data = getAgent(agent);
 
-        const data = ensureAgent(agent);
-
-        console.log("GHL EVENT:", agent, event);
+        console.log("PROCESSED EVENT:", agent, event);
 
         // =========================
-        // ONLY REAL STATE CHANGES
+        // CALL STATE LOGIC (SOURCE OF TRUTH = GHL ONLY)
         // =========================
 
         if (event === "call_started") {
@@ -119,6 +137,7 @@ app.post("/ghl-webhook", (req, res) => {
         }
 
         res.sendStatus(200);
+
     } catch (err) {
         console.log("Webhook error:", err.message);
         res.sendStatus(200);
@@ -126,7 +145,7 @@ app.post("/ghl-webhook", (req, res) => {
 });
 
 // =========================
-// DISCORD COMMANDS (ROLE LOCK)
+// ROLE PROTECTED SLASH COMMANDS
 // =========================
 
 client.on("interactionCreate", async interaction => {
@@ -144,7 +163,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     const name = member.displayName;
-    const data = ensureAgent(name);
+    const data = getAgent(name);
 
     if (interaction.commandName === "online") {
         data.presence = "online";
@@ -166,18 +185,18 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// DASHBOARD BUILDER
+// DASHBOARD FORMAT
 // =========================
 
 function formatTime(ms) {
-    const s = Math.floor(ms / 1000);
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return `${m}:${r.toString().padStart(2, "0")}`;
+    const total = Math.floor(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function dashboard() {
-    let out = [];
+function buildDashboard() {
+    let output = [];
 
     for (const [name, data] of Object.entries(agents)) {
         let status;
@@ -194,10 +213,10 @@ function dashboard() {
             status = "⚫ Offline";
         }
 
-        out.push(`${name} — ${status}`);
+        output.push(`${name} — ${status}`);
     }
 
-    return `📞 Live Agent Dashboard\n\n${out.join("\n") || "No agents"}`;
+    return `📞 Live Agent Dashboard\n\n${output.join("\n") || "No agents"}`;
 }
 
 // =========================
@@ -211,10 +230,10 @@ client.once("ready", async () => {
 
     const channel = await client.channels.fetch(process.env.CHANNEL_ID);
 
-    let msg = await channel.send(dashboard());
+    let msg = await channel.send(buildDashboard());
 
     setInterval(() => {
-        msg.edit(dashboard()).catch(() => {});
+        msg.edit(buildDashboard()).catch(() => {});
     }, 2000);
 });
 
